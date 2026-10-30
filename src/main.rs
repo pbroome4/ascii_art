@@ -7,14 +7,14 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::vec;
-use macroquad::prelude::*;
+use macroquad::{prelude::*, text};
 
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;  // width px / height px
-const FONT_ASPECT_RATIO: f32 = 3.0 / 5.0; // width char / height char 
+const FONT_ASPECT_RATIO: f32 = 0.4;//3.0 / 5.0; // width char / height char 
 const ASCII_COLS: usize = 300;  // width in chars
 const ASCII_ROWS: usize = (ASCII_COLS as f32  * FONT_ASPECT_RATIO / ASPECT_RATIO) as usize;
-type  AsciiGrid = [[char; ASCII_ROWS]; ASCII_COLS];
+type  AsciiGrid = [[u8; ASCII_ROWS]; ASCII_COLS];
 
 
 ////////////////////////////////////////////////////// 
@@ -33,19 +33,17 @@ async fn main() {
     if gifs.len() == 0{
         return;
     }
+
     let gif = &gifs[0];
     let mut frame_n = 0;
     let mut next_update = get_time();
     loop{
-
         println!("Drawing frame #{}", frame_n);
-        let width = screen_width();
-        let height = screen_height();
-        let font_size = height / ASCII_ROWS as f32;
         let frame = &gif.frames[frame_n % gif.frames.len()];
-        clear_background(BLACK);
         let s = grid_to_string(&frame.grid);
-        draw_multiline_text(s, 0.0, 0.0, font_size, Some(1.0), WHITE);
+        let (x, y, font_size) = calc_multiline_text_dim(&s);
+        clear_background(BLACK);
+        draw_multiline_text(s, x, y, font_size, Some(1.0), WHITE);
         if get_time() > next_update{
             frame_n += 1;
             next_update = get_time() + frame.delay.as_secs_f64();   
@@ -55,7 +53,20 @@ async fn main() {
     }
 }
 
+fn calc_multiline_text_dim(s: &str) -> (f32, f32, f32){
+        let (w_g, h_g) = grid_screen_dim(); // assumes size 1 font
+        let scale = (screen_width() / w_g).max(screen_height() / h_g).ceil();
+        let (x, y) = calc_position(scale*w_g, scale*h_g);
+        return (x,y,scale);
+}
 
+// Calculates the x0, y0 for top left corner of a rect to center it on the screen
+// provided the width and height of the rectangle 
+fn calc_position(w_img: f32, h_img: f32) -> (f32, f32){
+    let x0 = screen_width() / 2.0 - w_img / 2.0;
+    let y0 = screen_height() / 2.0 - h_img / 2.0;
+    return (x0, y0);
+}
 
 struct AsciiFrame{
     grid: AsciiGrid,
@@ -65,7 +76,7 @@ struct AsciiFrame{
 impl Default for AsciiFrame{
     fn default() -> Self {
         Self {
-            grid: [[0 as char; ASCII_ROWS]; ASCII_COLS],
+            grid: [[0; ASCII_ROWS]; ASCII_COLS],
             delay: Duration::from_millis(2000),
         }
     }
@@ -101,7 +112,7 @@ impl From<Vec<Frame>> for AsciiGif{
             ); 
             let im_gray_scale = grayscale(&im_buf);
             for (x, y, p) in im_gray_scale.enumerate_pixels(){
-                ascii.grid[x as usize][y as usize] = get_ascii_char(p[0], false);
+                ascii.grid[x as usize][y as usize] = p[0];
             }
             v.push(ascii);
         }
@@ -211,8 +222,7 @@ where
 // Converts grayscale value to ascii char
 // from value from 0 (empty) to 255 (Filled)
 fn get_ascii_char(gray: u8, reverse: bool) -> char {
-    const RAMP: &[u8] = b" .'`^\\\",;:Iel!><~+_-?][}{)(|/tfjxrnuvcXYZUJCQL0OZmwqpdbhkro*#MW&8%B@$";
-    //const RAMP: &[u8] = b" .-=*#@";
+    const RAMP: &[u8] = b".'`^\\\",;:Iel!><~+_-?][}{)(|/tfjxrnuvcXYZUJCQL0OZmwqpdbhkro*#MW&8%B@$";
     let max_index = RAMP.len() - 1;
     let mut index = ((gray as usize) * max_index) / 255;
     if reverse {
@@ -227,7 +237,7 @@ fn grid_to_string(grid: &AsciiGrid) -> String{
     let mut s = String::new();
     for r in 0..ASCII_ROWS{
         for c in 0..ASCII_COLS{
-            s.push(grid[c][r]);
+            s.push(get_ascii_char(grid[c][r], false));
         }
         s.push('\n');
     }
@@ -235,3 +245,16 @@ fn grid_to_string(grid: &AsciiGrid) -> String{
     return s;
 }
 
+
+// Gets width/height of grid drawn to screen in pixels assuming size one font.
+// Use this to determine font size.
+fn grid_screen_dim() -> (f32, f32){
+    let text_dimensions = measure_multiline_text( // Measure size of macroquad font
+        &grid_to_string(&AsciiFrame::default().grid),
+        None,
+        1,
+        1.0,
+        Some(1.0));
+    return (text_dimensions.width, text_dimensions.height);
+        
+}
