@@ -1,20 +1,24 @@
 use image::codecs::gif::{GifDecoder};
 use image::imageops::FilterType::{self, Nearest};
-use image::imageops::{crop_imm, grayscale, resize};
-use image::{AnimationDecoder, Frame, GenericImageView, ImageBuffer, Pixel, imageops, DynamicImage};
+use image::imageops::{grayscale, resize};
+use image::{AnimationDecoder, Frame, GenericImageView, ImageBuffer, Pixel, imageops};
+use macroquad::miniquad::date::now;
+use macroquad::rand::{RandomRange};
+use std::clone;
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
+use macroquad::{prelude::*};
+use std::ops::{Add, Index, IndexMut, Mul};
 use std::time::{Duration, Instant};
-use std::vec;
-use macroquad::{prelude::*, text};
+
+use crate::DisplayStates::Blur;
 
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;  // width px / height px
 const FONT_ASPECT_RATIO: f32 = 0.4;//3.0 / 5.0; // width char / height char 
-const ASCII_COLS: usize = 300;  // width in chars
+const ASCII_COLS: usize = 500;  // width in chars
 const ASCII_ROWS: usize = (ASCII_COLS as f32  * FONT_ASPECT_RATIO / ASPECT_RATIO) as usize;
-type  AsciiGrid = [[u8; ASCII_ROWS]; ASCII_COLS];
 
 
 ////////////////////////////////////////////////////// 
@@ -34,31 +38,204 @@ async fn main() {
         return;
     }
 
-    let gif = &gifs[0];
-    let mut frame_n = 0;
-    let mut next_update = get_time();
-    loop{
-        println!("Drawing frame #{}", frame_n);
-        let frame = &gif.frames[frame_n % gif.frames.len()];
-        let s = grid_to_string(&frame.grid);
-        let (x, y, font_size) = calc_multiline_text_dim(&s);
-        clear_background(BLACK);
-        draw_multiline_text(s, x, y, font_size, Some(1.0), WHITE);
-        if get_time() > next_update{
-            frame_n += 1;
-            next_update = get_time() + frame.delay.as_secs_f64();   
-        }
+
+    let blur_dur = Duration::from_secs(3); // seconds
+    let focus_duration = Duration::from_secs(5); // seconds
+    let mut curr_gif = &gifs[0];
+    let mut curr_grid = AsciiGrid::default();
+    let mut curr_state = DisplayStates::Blank;
+    let mut last_state_update = Instant::now();
+    let mut should_update_frame = true;
+
+    let mut blur_grid_start = AsciiGrid::default();
+    let mut blur_grid_end = AsciiGrid::default();
+
+    let mut focus_grid_start = AsciiGrid::default();
+    let mut focus_grid_end = AsciiGrid::default();
     
+    let mut play_frames = curr_gif.frames.iter();
+    let mut play_frame = play_frames.next().unwrap();
+    let mut last_play_update = Instant::now();
+
+    loop{
+        match curr_state{
+            DisplayStates::Blank =>{
+                curr_state = DisplayStates::Blur;
+                curr_grid = AsciiGrid::default();
+                blur_grid_start = curr_grid.clone();
+                blur_grid_end = AsciiGrid::random();
+                should_update_frame = true;
+            }
+            DisplayStates::Blur => {
+                let mut i = (Instant::now() - last_state_update).as_secs_f64() / blur_dur.as_secs_f64();
+                i = i.min(1.0);
+                curr_grid = blur_grid_start.add_eps(&blur_grid_end, i as f32);
+                should_update_frame = true;
+                
+                if i >= 1.0 {
+                    curr_state = DisplayStates::Focus;
+                    let gif_index = RandomRange::gen_range(0, gifs.len());
+                    info!("Selecting index: {}", gif_index);
+                    curr_gif = &gifs[gif_index];
+                    focus_grid_start = curr_grid.clone();
+                    focus_grid_end = curr_gif.frames[0].grid.clone();
+                    last_state_update = Instant::now();
+                }
+            }
+
+            DisplayStates::Focus => {
+                let mut i = (Instant::now() - last_state_update).as_secs_f64() / focus_duration.as_secs_f64();
+                i = i.min(1.0);
+                curr_grid = focus_grid_start.add_eps(&focus_grid_end, i as f32);
+                should_update_frame = true;
+                if i >= 1.0{
+                    curr_state = DisplayStates::Play;
+                    play_frames = curr_gif.frames.iter();
+                    last_play_update = Instant::now();
+                    last_state_update =Instant::now();
+                }
+            }
+
+            DisplayStates::Play => {                
+                if Instant::now() - last_play_update > play_frame.delay{
+                    if let Some(next_play_frame) = play_frames.next(){
+                        play_frame = next_play_frame;
+                        curr_grid = play_frame.grid.clone();
+                        should_update_frame = true;
+                    }else{
+                        blur_grid_start = curr_grid.clone();
+                        blur_grid_end = AsciiGrid::random();
+                        curr_state = Blur;
+                        last_state_update = Instant::now();
+                    }
+                }
+            }
+        }
+        let a = AsciiScreenParams::from(&curr_grid);
+        clear_background(BLACK);
+        draw_multiline_text(a.s, a.x, a.y, a.font_size, Some(1.0), WHITE);    
         next_frame().await
     }
 }
 
-fn calc_multiline_text_dim(s: &str) -> (f32, f32, f32){
+enum DisplayStates{
+    Blank,
+    Blur,
+    Focus,
+    Play
+}
+
+#[derive(Clone)]
+struct AsciiGrid{
+    g: [[u8; ASCII_ROWS]; ASCII_COLS]
+} 
+
+impl AsciiGrid{
+    fn random()->Self{
+        let mut a = AsciiGrid::default();
+        for c in 0..ASCII_COLS{
+            for r in 0..ASCII_ROWS{
+                a[c][r] = RandomRange::gen_range(0, 255) as u8;
+            }
+        }
+        return a;
+    }
+
+    //fn blur(&mut self, epsilon: f32){
+    //    let rnd = AsciiGrid::random();
+    //    for c in 0..ASCII_COLS{
+    //        for r in 0..ASCII_ROWS{
+    //            let v =  (1.0 - epsilon) * self[c][r] as f32 +
+    //                         epsilon * rnd[c][r] as f32;
+    //            self[c][r] = v as u8;
+    //        }
+    //    }
+    //}
+
+    fn add_eps(&self, other: &AsciiGrid, epsilon: f32)-> Self{
+        let mut ret = AsciiGrid::default();
+        for c in 0..ASCII_COLS{
+            for r in 0..ASCII_ROWS{
+                let v =  (1.0 - epsilon) * self[c][r] as f32 +
+                             epsilon * other[c][r] as f32;
+                ret[c][r] = v as u8;
+            }
+        }
+        return ret;
+    }
+}
+
+impl Default for AsciiGrid{
+    fn default() -> Self {
+        Self { g: [[0;ASCII_ROWS]; ASCII_COLS] }
+    }
+}
+
+//impl Add<&Self> for AsciiGrid{
+//    type Output = Self;
+//    fn add(mut self, rhs: &Self) -> Self::Output {
+//        for c in 0..ASCII_COLS{
+//            for r in 0..ASCII_ROWS{
+//                self.g[c][r] += rhs.g[c][r];
+//            }
+//        }
+//        return self;
+//    }
+//}
+
+impl Index<usize> for AsciiGrid{
+    type Output = [u8; ASCII_ROWS];
+    fn index(&self, index: usize) -> &Self::Output {
+        return &self.g[index];
+    }
+}
+
+
+impl IndexMut<usize> for AsciiGrid{
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        return &mut self.g[index];
+    }
+}
+
+
+impl From<&AsciiGrid> for String{
+    fn from(g: &AsciiGrid) -> Self {
+    let mut s = String::new();
+    for r in 0..ASCII_ROWS{
+        for c in 0..ASCII_COLS{
+            s.push(get_ascii_char(g[c][r], false));
+        }
+        s.push('\n');
+    }
+    return s;   
+    }
+}
+
+
+struct AsciiScreenParams{
+    s: String,
+    x: f32,
+    y: f32,
+    font_size: f32
+}
+
+
+impl From<&AsciiGrid> for AsciiScreenParams{
+    fn from(g: &AsciiGrid) -> Self {    
+        let s = String::from(g);
         let (w_g, h_g) = grid_screen_dim(); // assumes size 1 font
         let scale = (screen_width() / w_g).max(screen_height() / h_g).ceil();
         let (x, y) = calc_position(scale*w_g, scale*h_g);
-        return (x,y,scale);
+        let a = AsciiScreenParams{
+            s: s,
+            x:x,
+            y:y,
+            font_size: scale,
+        };
+        return a;
+    }
 }
+
 
 // Calculates the x0, y0 for top left corner of a rect to center it on the screen
 // provided the width and height of the rectangle 
@@ -76,7 +253,7 @@ struct AsciiFrame{
 impl Default for AsciiFrame{
     fn default() -> Self {
         Self {
-            grid: [[0; ASCII_ROWS]; ASCII_COLS],
+            grid: AsciiGrid::default(),
             delay: Duration::from_millis(2000),
         }
     }
@@ -222,7 +399,7 @@ where
 // Converts grayscale value to ascii char
 // from value from 0 (empty) to 255 (Filled)
 fn get_ascii_char(gray: u8, reverse: bool) -> char {
-    const RAMP: &[u8] = b".'`^\\\",;:Iel!><~+_-?][}{)(|/tfjxrnuvcXYZUJCQL0OZmwqpdbhkro*#MW&8%B@$";
+    const RAMP: &[u8] = b" .'`^\\\",;:Iel!><~+_-?][}{)(|/tfjxrnuvcXYZUJCQL0OZmwqpdbhkro*#MW&8%B@$";
     let max_index = RAMP.len() - 1;
     let mut index = ((gray as usize) * max_index) / 255;
     if reverse {
@@ -233,28 +410,16 @@ fn get_ascii_char(gray: u8, reverse: bool) -> char {
 
 
 
-fn grid_to_string(grid: &AsciiGrid) -> String{
-    let mut s = String::new();
-    for r in 0..ASCII_ROWS{
-        for c in 0..ASCII_COLS{
-            s.push(get_ascii_char(grid[c][r], false));
-        }
-        s.push('\n');
-    }
-
-    return s;
-}
-
 
 // Gets width/height of grid drawn to screen in pixels assuming size one font.
 // Use this to determine font size.
 fn grid_screen_dim() -> (f32, f32){
     let text_dimensions = measure_multiline_text( // Measure size of macroquad font
-        &grid_to_string(&AsciiFrame::default().grid),
+        &String::from(&AsciiFrame::default().grid),
         None,
         1,
         1.0,
         Some(1.0));
-    return (text_dimensions.width, text_dimensions.height);
-        
+    return (text_dimensions.width, text_dimensions.height);       
 }
+
