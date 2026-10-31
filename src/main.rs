@@ -1,24 +1,26 @@
 use image::codecs::gif::{GifDecoder};
 use image::imageops::FilterType::{self, Nearest};
 use image::imageops::{grayscale, resize};
+use image::metadata::LoopCount::{self, Finite};
 use image::{AnimationDecoder, Frame, GenericImageView, ImageBuffer, Pixel, imageops};
-use macroquad::miniquad::date::now;
 use macroquad::rand::{RandomRange};
-use std::clone;
+use std::{io};
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufRead, BufReader, Seek};
 use std::path::{PathBuf};
 use macroquad::{prelude::*};
-use std::ops::{Add, Index, IndexMut, Mul};
+use std::ops::{Index, IndexMut};
 use std::time::{Duration, Instant};
+use std::fmt::Display;
 
 use crate::DisplayStates::Blur;
 
 
-const ASPECT_RATIO: f32 = 16.0 / 9.0;  // width px / height px
+const ASPECT_RATIO: f32 = 9.0 / 9.0;  // width px / height px
 const FONT_ASPECT_RATIO: f32 = 0.4;//3.0 / 5.0; // width char / height char 
-const ASCII_COLS: usize = 500;  // width in chars
+const ASCII_COLS: usize = 400;  // width in chars
 const ASCII_ROWS: usize = (ASCII_COLS as f32  * FONT_ASPECT_RATIO / ASPECT_RATIO) as usize;
+const LOOP_DUR: Duration = Duration::from_secs(10); // If a gif is a looper, loop for this duration
 
 
 ////////////////////////////////////////////////////// 
@@ -38,14 +40,14 @@ async fn main() {
         return;
     }
 
+    rand::srand(miniquad::date::now() as u64);
 
-    let blur_dur = Duration::from_secs(3); // seconds
-    let focus_duration = Duration::from_secs(5); // seconds
+    let blur_dur = Duration::from_secs(2); // seconds
+    let focus_duration = Duration::from_secs(2); // seconds
     let mut curr_gif = &gifs[0];
     let mut curr_grid = AsciiGrid::default();
     let mut curr_state = DisplayStates::Blank;
     let mut last_state_update = Instant::now();
-    let mut should_update_frame = true;
 
     let mut blur_grid_start = AsciiGrid::default();
     let mut blur_grid_end = AsciiGrid::default();
@@ -53,26 +55,26 @@ async fn main() {
     let mut focus_grid_start = AsciiGrid::default();
     let mut focus_grid_end = AsciiGrid::default();
     
-    let mut play_frames = curr_gif.frames.iter();
+    let mut play_frames = curr_gif.iter();
     let mut play_frame = play_frames.next().unwrap();
     let mut last_play_update = Instant::now();
 
     loop{
         match curr_state{
             DisplayStates::Blank =>{
+                println!("State Blank - >Blur");
                 curr_state = DisplayStates::Blur;
                 curr_grid = AsciiGrid::default();
                 blur_grid_start = curr_grid.clone();
                 blur_grid_end = AsciiGrid::random();
-                should_update_frame = true;
             }
             DisplayStates::Blur => {
                 let mut i = (Instant::now() - last_state_update).as_secs_f64() / blur_dur.as_secs_f64();
                 i = i.min(1.0);
                 curr_grid = blur_grid_start.add_eps(&blur_grid_end, i as f32);
-                should_update_frame = true;
                 
                 if i >= 1.0 {
+                    println!("State Blur -> Focus");
                     curr_state = DisplayStates::Focus;
                     let gif_index = RandomRange::gen_range(0, gifs.len());
                     info!("Selecting index: {}", gif_index);
@@ -87,10 +89,10 @@ async fn main() {
                 let mut i = (Instant::now() - last_state_update).as_secs_f64() / focus_duration.as_secs_f64();
                 i = i.min(1.0);
                 curr_grid = focus_grid_start.add_eps(&focus_grid_end, i as f32);
-                should_update_frame = true;
                 if i >= 1.0{
+                    println!("State Focus -> Play");
                     curr_state = DisplayStates::Play;
-                    play_frames = curr_gif.frames.iter();
+                    play_frames = curr_gif.iter();
                     last_play_update = Instant::now();
                     last_state_update =Instant::now();
                 }
@@ -101,11 +103,12 @@ async fn main() {
                     if let Some(next_play_frame) = play_frames.next(){
                         play_frame = next_play_frame;
                         curr_grid = play_frame.grid.clone();
-                        should_update_frame = true;
+                        last_play_update = Instant::now();
                     }else{
+                        println!("State Play -> Blur");
+                        curr_state = Blur;
                         blur_grid_start = curr_grid.clone();
                         blur_grid_end = AsciiGrid::random();
-                        curr_state = Blur;
                         last_state_update = Instant::now();
                     }
                 }
@@ -125,7 +128,7 @@ enum DisplayStates{
     Play
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct AsciiGrid{
     g: [[u8; ASCII_ROWS]; ASCII_COLS]
 } 
@@ -140,17 +143,6 @@ impl AsciiGrid{
         }
         return a;
     }
-
-    //fn blur(&mut self, epsilon: f32){
-    //    let rnd = AsciiGrid::random();
-    //    for c in 0..ASCII_COLS{
-    //        for r in 0..ASCII_ROWS{
-    //            let v =  (1.0 - epsilon) * self[c][r] as f32 +
-    //                         epsilon * rnd[c][r] as f32;
-    //            self[c][r] = v as u8;
-    //        }
-    //    }
-    //}
 
     fn add_eps(&self, other: &AsciiGrid, epsilon: f32)-> Self{
         let mut ret = AsciiGrid::default();
@@ -245,6 +237,7 @@ fn calc_position(w_img: f32, h_img: f32) -> (f32, f32){
     return (x0, y0);
 }
 
+#[derive(Debug)]
 struct AsciiFrame{
     grid: AsciiGrid,
     delay: Duration,  // seconds
@@ -259,54 +252,117 @@ impl Default for AsciiFrame{
     }
 }
 
-
-struct AsciiGif{
-    frames: Vec<AsciiFrame>,
-}
-
-
-impl From<Vec<Frame>> for AsciiGif{
-    fn from(frames: Vec<Frame>) -> Self {
-        let mut v = Vec::new();
-        for frame in frames{
-            let mut ascii = AsciiFrame::default();
-            ascii.delay = frame.delay().into();
-            let im_buf = frame.into_buffer();
-            let im_buf = stretch_hw( // predistort the image bc font not square
-                &im_buf,
-                FONT_ASPECT_RATIO,
-                Nearest);
-            let im_buf = resize_to_fill( 
-                &im_buf,
-                ASCII_COLS as u32,
-                ASCII_ROWS as u32,
-                true,
-                Nearest);
-            let im_buf = crop_center(
-                &im_buf,
-                ASCII_COLS as u32,
-                ASCII_ROWS as u32
-            ); 
-            let im_gray_scale = grayscale(&im_buf);
-            for (x, y, p) in im_gray_scale.enumerate_pixels(){
-                ascii.grid[x as usize][y as usize] = p[0];
-            }
-            v.push(ascii);
+impl From<Frame> for AsciiFrame{
+    fn from(frame: Frame) -> Self {
+        let mut ascii = AsciiFrame::default();
+        ascii.delay = frame.delay().into();
+        let im_buf = frame.into_buffer();
+        let im_buf = stretch_hw( // predistort the image bc font not square
+            &im_buf,
+            FONT_ASPECT_RATIO,
+            Nearest);
+        let im_buf = resize_to_fill( 
+            &im_buf,
+            ASCII_COLS as u32,
+            ASCII_ROWS as u32,
+            true,
+            Nearest);
+        let im_buf = crop_center(
+            &im_buf,
+            ASCII_COLS as u32,
+            ASCII_ROWS as u32
+        ); 
+        let im_gray_scale = grayscale(&im_buf);
+        for (x, y, p) in im_gray_scale.enumerate_pixels(){
+            ascii.grid[x as usize][y as usize] = p[0];
         }
-        return Self {
-            frames: v
-        };
+        //println!("Created AsciiFrame: {:?}", ascii);
+        return ascii;
     }
 }
+
+
+#[derive(Debug)]
+struct AsciiGif{
+    frames: Vec<AsciiFrame>,
+    loop_count: usize,
+}
+
+impl AsciiGif{
+    fn iter(&self) -> AsciiGifIterator{
+        let i = AsciiGifIterator{
+            a: self,
+            it_index: 0,
+        };
+        return i;
+    }
+
+    fn calc_duration(&self) -> Duration{
+        let mut d = Duration::from_secs(0);
+        for frame in self.frames.iter(){
+            d += frame.delay
+        }
+        return d;
+    }
+}
+
+impl <R> From<GifDecoder<R>> for AsciiGif
+where 
+    R: BufRead + Seek
+{
+    // 
+    fn from(decoder: GifDecoder<R>) -> Self {
+        let lc = decoder.loop_count();    
+        let frames = decoder.into_frames()
+                            .collect_frames()
+                            .expect("error decoding gif");
+        let loop_count = calc_loop_count(&frames, &lc, LOOP_DUR);
+        let mut v = Vec::new();
+        for frame in frames{
+            let a = AsciiFrame::from(frame);
+            v.push(a);
+        }
+        let s = Self {
+            frames: v,
+            loop_count: loop_count,
+        };
+        println!("Created AsciiGif: {}", &s);
+        return s;
+    }
+}
+
+impl Display for AsciiGif{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "AsciiGif is frames.len(): {}, duration: {}, loop_count: {}}}",
+        self.frames.len(), self.calc_duration().as_secs_f32(), self.loop_count)
+    }
+}
+
 
 impl From<PathBuf> for AsciiGif{
     fn from(value: PathBuf) -> Self {
         let file_in = BufReader::new(File::open(value).unwrap());
         let decoder = GifDecoder::new(file_in).unwrap();
-        let frames = decoder.into_frames()
-                            .collect_frames()
-                            .expect("error decoding gif");
-        return AsciiGif::from(frames);
+        return AsciiGif::from(decoder);
+    }
+}
+
+
+struct AsciiGifIterator<'a>{
+    a: &'a AsciiGif,
+    it_index:usize
+}
+
+impl <'a> Iterator for AsciiGifIterator<'a>{
+    type Item = &'a AsciiFrame;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+            if self.it_index > self.a.frames.len() * self.a.loop_count{
+                return None;
+            }
+            let r = &self.a.frames[self.it_index % self.a.frames.len()];
+            self.it_index += 1;
+            return Some(r);
     }
 }
 
@@ -324,6 +380,37 @@ fn read_gif_resources() -> Vec<AsciiGif>{
         }
     }
     return v;
+}
+
+fn calc_duration(v: &Vec<Frame>)-> Duration{
+    let mut d = Duration::from_secs(0);
+    for f in v.iter(){
+        d += f.delay().into();
+    }
+    return d;
+}
+
+// If loopcount is 1, treat gif as non repeating and return 1
+// If loop count is >1 or infinite, treat it as repeating and return 
+// #loops such that gif is at least target_dur long.
+fn calc_loop_count(v: &Vec<Frame>, lc: &LoopCount, target_dur: Duration) -> usize{
+    let loop_count: usize = match lc{
+        Finite(n) => {
+            let mut l = 1;
+            if n.get() > 1{
+                println!("Loop count > 1");
+                let d = calc_duration(v);
+                l = (target_dur.as_secs_f32() / d.as_secs_f32()).ceil() as usize
+            }
+            l
+        }
+        LoopCount::Infinite => {
+            println!("Loop count: infinite");
+            let d = calc_duration(v);
+            (target_dur.as_secs_f32() / d.as_secs_f32()).ceil() as usize
+        }
+    };
+    return loop_count;
 }
 
 // Scale image up by hw = height/width.
