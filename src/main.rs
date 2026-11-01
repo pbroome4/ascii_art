@@ -13,24 +13,15 @@ use std::ops::{Index, IndexMut};
 use std::time::{Duration, Instant};
 use std::fmt::Display;
 
-use crate::DisplayStates::Blur;
 
 
 const ASPECT_RATIO: f32 = 9.0 / 9.0;  // width px / height px
 const FONT_ASPECT_RATIO: f32 = 0.4;//3.0 / 5.0; // width char / height char 
 const ASCII_COLS: usize = 500;  // width in chars
 const ASCII_ROWS: usize = (ASCII_COLS as f32  * FONT_ASPECT_RATIO / ASPECT_RATIO) as usize;
-const LOOP_DUR: Duration = Duration::from_secs(2); // If a gif is a looper, loop for this duration
-const TIME_DIALATE_FACTOR:f32 = 2.0;
+const LOOP_DUR: Duration = Duration::from_secs(5); // If a gif is a looper, loop for this duration
 
 ////////////////////////////////////////////////////// 
-// Process each gifs/images into vector of grayscale.
-// hold current 2d grayscale image as var. 
-// loop
-//      select random noise as a target
-//      pick random gif as a target
-//      pick each frame of gif as target.
-
 
 
 #[macroquad::main("Test")]
@@ -43,77 +34,33 @@ async fn main() {
     rand::srand(miniquad::date::now() as u64);
 
     let blur_dur = Duration::from_secs(2); // seconds
-    let focus_duration = Duration::from_secs(2); // seconds
     let mut curr_gif = &gifs[0];
+    let mut next_gif = &gifs[0];
     let mut curr_grid = AsciiGrid::default();
-    let mut curr_state = DisplayStates::Blank;
-    let mut last_state_update = Instant::now();
-
-    let mut blur_grid_start = AsciiGrid::default();
-    let mut blur_grid_end = AsciiGrid::default();
-
-    let mut focus_grid_start = AsciiGrid::default();
-    let mut focus_grid_end = AsciiGrid::default();
-    
-    let mut play_frames = curr_gif.iter();
-    let mut play_frame = play_frames.next().unwrap();
-    let mut last_play_update = Instant::now();
-
+    let mut curr_start = Instant::now();
+    let mut next_start = Instant::now() + curr_gif.calc_looped_duration() - blur_dur;
     loop{
-        match curr_state{
-            DisplayStates::Blank =>{
-                println!("State Blank - >Blur");
-                curr_state = DisplayStates::Blur;
-                curr_grid = AsciiGrid::default();
-                blur_grid_start = curr_grid.clone();
-                blur_grid_end = AsciiGrid::random();
-            }
-            DisplayStates::Blur => {
-                let mut i = (Instant::now() - last_state_update).as_secs_f64() / blur_dur.as_secs_f64();
-                i = i.min(1.0);
-                curr_grid = blur_grid_start.add_eps(&blur_grid_end, i as f32);
-                
-                if i >= 1.0 {
-                    println!("State Blur -> Focus");
-                    curr_state = DisplayStates::Focus;
-                    let gif_index = RandomRange::gen_range(0, gifs.len());
-                    info!("Selecting index: {}", gif_index);
-                    curr_gif = &gifs[gif_index];
-                    focus_grid_start = curr_grid.clone();
-                    focus_grid_end = curr_gif.frames[0].grid.clone();
-                    last_state_update = Instant::now();
-                }
-            }
-
-            DisplayStates::Focus => {
-                let mut i = (Instant::now() - last_state_update).as_secs_f64() / focus_duration.as_secs_f64();
-                i = i.min(1.0);
-                curr_grid = focus_grid_start.add_eps(&focus_grid_end, i as f32);
-                if i >= 1.0{
-                    println!("State Focus -> Play");
-                    curr_state = DisplayStates::Play;
-                    play_frames = curr_gif.iter();
-                    last_play_update = Instant::now();
-                    last_state_update =Instant::now();
-                }
-            }
-
-            DisplayStates::Play => {                
-                if Instant::now() - last_play_update > play_frame.delay.mul_f32(TIME_DIALATE_FACTOR){
-                    if let Some(next_play_frame) = play_frames.next(){
-                        play_frame = next_play_frame;
-                        curr_grid = play_frame.grid.clone();
-                        last_play_update = Instant::now();
-                    }else{
-                        println!("State Play -> Blur");
-                        curr_state = Blur;
-                        blur_grid_start = curr_grid.clone();
-                        blur_grid_end = AsciiGrid::random();
-                        last_state_update = Instant::now();
-                    }
-                }
-            }
-        }
+        let n = Instant::now();
+        if n < next_start{
+            let curr_gif_time = (n - curr_start).as_secs_f32();
+            println!("Rendering current gif, time: {}", curr_gif_time);
+            curr_grid = curr_gif.get_frame(curr_gif_time).grid.clone();
+        }else if n > next_start && n < curr_start + curr_gif.calc_looped_duration(){
+            let epsilon = (n-next_start).as_secs_f32() / blur_dur.as_secs_f32();
+            let grid1 = &curr_gif.get_frame((n-curr_start).as_secs_f32()).grid;
+            let grid2 = &next_gif.get_frame((n-next_start).as_secs_f32()).grid;
+            println!("Rendering transition frame {}%", epsilon * 100.0);
+            curr_grid = grid1.add_eps(grid2, epsilon);
+        }else{
+            curr_start = next_start;
+            curr_gif = next_gif;
+            let curr_giff_time = (n-curr_start).as_secs_f32();
+            let next_gif_index = RandomRange::gen_range(0, gifs.len());
+            next_gif = &gifs[next_gif_index];
+            next_start = curr_start + curr_gif.calc_looped_duration() - blur_dur;
+            println!("Next gif index: {}. Current gif time: {}", next_gif_index, curr_giff_time);
+            curr_grid = curr_gif.get_frame(curr_giff_time).grid.clone();
+        }        
         let a = AsciiScreenParams::from(&curr_grid);
         clear_background(BLACK);
         draw_multiline_text(a.s, a.x, a.y, a.font_size, Some(1.0), WHITE);    
@@ -304,6 +251,22 @@ impl AsciiGif{
         }
         return d;
     }
+
+    fn calc_looped_duration(&self) -> Duration{
+        return self.calc_duration() * self.loop_count as u32;
+    }
+
+    fn get_frame(&self, mut time: f32) -> &AsciiFrame{
+        time = time % self.calc_duration().as_secs_f32();
+        for frame in self.frames.iter(){
+            time -= frame.delay.as_secs_f32();
+            if time <= 0.0{
+                return frame;
+            }
+        }
+        return &self.frames[0];
+    }
+
 }
 
 impl <R> From<GifDecoder<R>> for AsciiGif
