@@ -1,5 +1,5 @@
 use image::codecs::gif::{GifDecoder};
-use image::imageops::FilterType::{self, Nearest};
+use image::imageops::FilterType::{self, Gaussian, Nearest};
 use image::imageops::{grayscale, resize};
 use image::metadata::LoopCount::{self, Finite};
 use image::{AnimationDecoder, Frame, GenericImageView, ImageBuffer, Pixel, imageops};
@@ -18,10 +18,10 @@ use crate::DisplayStates::Blur;
 
 const ASPECT_RATIO: f32 = 9.0 / 9.0;  // width px / height px
 const FONT_ASPECT_RATIO: f32 = 0.4;//3.0 / 5.0; // width char / height char 
-const ASCII_COLS: usize = 400;  // width in chars
+const ASCII_COLS: usize = 500;  // width in chars
 const ASCII_ROWS: usize = (ASCII_COLS as f32  * FONT_ASPECT_RATIO / ASPECT_RATIO) as usize;
-const LOOP_DUR: Duration = Duration::from_secs(10); // If a gif is a looper, loop for this duration
-
+const LOOP_DUR: Duration = Duration::from_secs(2); // If a gif is a looper, loop for this duration
+const TIME_DIALATE_FACTOR:f32 = 2.0;
 
 ////////////////////////////////////////////////////// 
 // Process each gifs/images into vector of grayscale.
@@ -99,7 +99,7 @@ async fn main() {
             }
 
             DisplayStates::Play => {                
-                if Instant::now() - last_play_update > play_frame.delay{
+                if Instant::now() - last_play_update > play_frame.delay.mul_f32(TIME_DIALATE_FACTOR){
                     if let Some(next_play_frame) = play_frames.next(){
                         play_frame = next_play_frame;
                         curr_grid = play_frame.grid.clone();
@@ -130,7 +130,7 @@ enum DisplayStates{
 
 #[derive(Clone, Debug)]
 struct AsciiGrid{
-    g: [[u8; ASCII_ROWS]; ASCII_COLS]
+    g: Vec<Vec<u8>> //col x row
 } 
 
 impl AsciiGrid{
@@ -159,7 +159,7 @@ impl AsciiGrid{
 
 impl Default for AsciiGrid{
     fn default() -> Self {
-        Self { g: [[0;ASCII_ROWS]; ASCII_COLS] }
+        Self { g: vec![vec![0;ASCII_ROWS]; ASCII_COLS] }
     }
 }
 
@@ -176,7 +176,7 @@ impl Default for AsciiGrid{
 //}
 
 impl Index<usize> for AsciiGrid{
-    type Output = [u8; ASCII_ROWS];
+    type Output = Vec<u8>;
     fn index(&self, index: usize) -> &Self::Output {
         return &self.g[index];
     }
@@ -260,13 +260,13 @@ impl From<Frame> for AsciiFrame{
         let im_buf = stretch_hw( // predistort the image bc font not square
             &im_buf,
             FONT_ASPECT_RATIO,
-            Nearest);
+            Gaussian);
         let im_buf = resize_to_fill( 
             &im_buf,
             ASCII_COLS as u32,
             ASCII_ROWS as u32,
             true,
-            Nearest);
+            Gaussian);
         let im_buf = crop_center(
             &im_buf,
             ASCII_COLS as u32,
@@ -467,14 +467,14 @@ where
     I::Pixel: 'static,
     <I::Pixel as Pixel>::Subpixel: 'static,
 {
-    let mut im_buf = imageops::resize(i, i.width(), i.height(), Nearest); // TODO how else to convert image to imagebuf?
+    let mut im_buf = imageops::resize(i, i.width(), i.height(), Gaussian); // TODO how else to convert image to imagebuf?
     if w > im_buf.width(){
         println!("Warning, crop width larger than image width, resizing image instead");
-        im_buf = resize(&im_buf, w, im_buf.height(), Nearest);
+        im_buf = resize(&im_buf, w, im_buf.height(), Gaussian);
     }
     if h > im_buf.height(){
         println!("Warning, crop height is larger than image height, resizing image instead");
-        im_buf = resize(&im_buf, im_buf.width(), h, Nearest);
+        im_buf = resize(&im_buf, im_buf.width(), h, Gaussian);
     }
     let x0 = im_buf.width()/2 - w/2;
     let y0 = im_buf.height()/2 - h/2;
@@ -486,7 +486,8 @@ where
 // Converts grayscale value to ascii char
 // from value from 0 (empty) to 255 (Filled)
 fn get_ascii_char(gray: u8, reverse: bool) -> char {
-    const RAMP: &[u8] = b" .'`^\\\",;:Iel!><~+_-?][}{)(|/tfjxrnuvcXYZUJCQL0OZmwqpdbhkro*#MW&8%B@$";
+    //const RAMP: &[u8] = b" .'`^\",;:lI!i<>+~_-?[]{}()|\\/tfjrxnuvczyXUJLCQ0OZmwqpdbhkhao*#MW&8%B@$";
+    const RAMP: &[u8] = b" .:-=+*#%@";
     let max_index = RAMP.len() - 1;
     let mut index = ((gray as usize) * max_index) / 255;
     if reverse {
